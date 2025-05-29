@@ -1,26 +1,27 @@
-FROM golang:1.24.3-alpine AS build
-ARG VERSION="dev"
+# Stage 1: Build the Linux AMD64 binary
+FROM golang:1.24-alpine AS builder
+WORKDIR /src
 
-# Set the working directory
-WORKDIR /build
+# Copy go.mod/go.sum and download deps (cacheable)
+COPY go.mod go.sum ./
+RUN go mod download
 
-# Install git
-RUN --mount=type=cache,target=/var/cache/apk \
-    apk add git
+# Copy the rest of the code
+COPY . .
 
-# Build the server
-# go build automatically download required module dependencies to /go/pkg/mod
-RUN --mount=type=cache,target=/go/pkg/mod \
-    --mount=type=cache,target=/root/.cache/go-build \
-    --mount=type=bind,target=. \
-    CGO_ENABLED=0 go build -ldflags="-s -w -X main.version=${VERSION} -X main.commit=$(git rev-parse HEAD) -X main.date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-    -o /bin/github-mcp-server cmd/github-mcp-server/main.go
+# Build a static Linux/amd64 binary
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+    go build -ldflags "-s -w" \
+    -o /bin/github-mcp-server \
+    cmd/github-mcp-server/main.go
 
-# Make a stage to run the app
-FROM gcr.io/distroless/base-debian12
-# Set the working directory
-WORKDIR /server
-# Copy the binary from the build stage
-COPY --from=build /bin/github-mcp-server .
-# Command to run the server
-CMD ["./github-mcp-server", "stdio"]
+# Stage 2: Run via Supergateway
+FROM ghcr.io/supercorp-ai/supergateway:v2.4.0
+
+# Copy the binary in and make executable
+COPY --from=builder /bin/github-mcp-server /usr/bin/github-mcp-server
+RUN chmod +x /usr/bin/github-mcp-server
+
+# Supergateway entrypoint
+ENTRYPOINT ["supergateway"]
+CMD ["--stdio", "/usr/bin/github-mcp-server stdio", "--port", "8080", "--ssePath", "/sse", "--messagePath", "/message", "--cors", "--env", "GITHUB_PERSONAL_ACCESS_TOKEN"]
